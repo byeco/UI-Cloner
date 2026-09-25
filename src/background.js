@@ -19,7 +19,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   try {
     chrome.contextMenus.create({
       id: 'open-omnitab-sidepanel',
-      title: 'byeco: Yan Paneli Aç',
+      title: 'UI Cloner: Yan Paneli Aç',
       contexts: ['all']
     });
   } catch {}

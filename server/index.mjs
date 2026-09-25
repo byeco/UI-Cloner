@@ -70,28 +70,27 @@ const keySource = encryptedKey ? 'encrypted-store' : (groqApiKey ? 'environment'
 if (!encryptedKey && plaintextKeyInEnvFile()) {
   console.warn('[security] Plaintext GROQ_API_KEY found in .env. Run: powershell -ExecutionPolicy Bypass -File scripts/set-key.ps1');
 }
-const defaultModel = process.env.GROQ_MODEL || 'groq/compound-mini';
+const defaultModel = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 
 // --- Allow-lists: never forward an arbitrary client-supplied model string
-// to Groq on the server's key.
+// to Groq on the server's key. NOTE: groq/compound* were retired by Groq
+// (404) — only models verified against /v1/models are listed here.
 const VALID_MODELS = new Set([
   'openai/gpt-oss-120b',
-  'qwen/qwen3.8-27b',
-  'groq/compound',
-  'groq/compound-mini'
+  'openai/gpt-oss-20b',
+  'qwen/qwen3.8-27b'
 ]);
 const VALID_LANGUAGES = new Set(['tr', 'en']);
 if (!VALID_MODELS.has(defaultModel)) {
-  console.warn(`[security] GROQ_MODEL "${defaultModel}" is not allow-listed; falling back to groq/compound-mini.`);
+  console.warn(`[security] GROQ_MODEL "${defaultModel}" is not allow-listed; falling back to openai/gpt-oss-120b.`);
 }
-const effectiveDefault = VALID_MODELS.has(defaultModel) ? defaultModel : 'groq/compound-mini';
+const effectiveDefault = VALID_MODELS.has(defaultModel) ? defaultModel : 'openai/gpt-oss-120b';
 
 const sharedUsage = new Map();
 const modelLimits = {
   'openai/gpt-oss-120b': { requestsPerMinute: 30, requestsPerDay: 5, tokensPerMinute: 8000, tokensPerDay: 200000 },
-  'qwen/qwen3.8-27b': { requestsPerMinute: 30, requestsPerDay: 10, tokensPerMinute: 8000, tokensPerDay: 200000 },
-  'groq/compound': { requestsPerMinute: 30, requestsPerDay: null, tokensPerMinute: 70000, tokensPerDay: null },
-  'groq/compound-mini': { requestsPerMinute: 30, requestsPerDay: null, tokensPerMinute: 70000, tokensPerDay: null }
+  'openai/gpt-oss-20b': { requestsPerMinute: 30, requestsPerDay: 10, tokensPerMinute: 8000, tokensPerDay: 200000 },
+  'qwen/qwen3.8-27b': { requestsPerMinute: 30, requestsPerDay: 10, tokensPerMinute: 8000, tokensPerDay: 200000 }
 };
 
 // --- Minimal security headers (no extra dependency).
@@ -205,13 +204,31 @@ function extractJsonObject(text) {
   }
 }
 
-function sanitizeAnalysis(value) {
+function fieldLengths(value) {
+  const out = {};
+  for (const field of Object.keys(RESPONSE_FIELD_CAPS)) {
+    const raw = value?.[field];
+    out[field] = typeof raw === 'string' ? raw.trim().length : typeof raw;
+  }
+  return out;
+}
+
+function sanitizeAnalysis(value, activeLanguage = 'tr') {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  // reactCode olmadan çıktı işe yaramaz; diğer alanlar boşsa varsayılan doldur.
+  const code = value.reactCode;
+  if (typeof code !== 'string' || code.trim().length === 0) return null;
+  const fallbackSummary = activeLanguage === 'tr' ? 'Bileşen klonlandı.' : 'Component cloned.';
   const out = {};
   for (const [field, cap] of Object.entries(RESPONSE_FIELD_CAPS)) {
     const raw = value[field];
-    if (typeof raw !== 'string' || raw.trim().length === 0) return null;
-    out[field] = raw.slice(0, cap);
+    if (typeof raw === 'string' && raw.trim().length > 0) {
+      out[field] = raw.slice(0, cap);
+    } else if (field === 'summary') {
+      out[field] = fallbackSummary;
+    } else {
+      out[field] = '';
+    }
   }
   return out;
 }
@@ -266,17 +283,22 @@ Keep the whole JSON compact so it fits: short class strings, no comments, no bla
 Selected UI: ${JSON.stringify(selection).slice(0, 24000)}`;
 
   // Big components used to get cut off at 1700 tokens -> "valid JSON" 502s.
-  // 4000 output tokens + light repair + one automatic retry fixes that class.
+  // 4000 output tokens + light repair + up to 3 attempts fixes that class.
+  // Empty reactCode is also treated as a failed attempt so we retry instead
+  // of returning a useless result (or a 502) on the first try.
   const OUT_TOKENS = 4000;
+  const COMPACT_PROMPT = `Return ONLY a compact valid JSON object with exactly four string fields: summary, reactCode, pureCss, tailwindClasses. No markdown, no extra fields, no truncation. reactCode must be a complete React functional component (never empty); shorten it if needed but keep it valid. Selected UI: ${JSON.stringify(selection).slice(0, 12000)}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);
   try {
     let parsed = null;
     const attempts = [];
-    for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+    for (let attempt = 0; attempt < 3 && !parsed; attempt++) {
       const prompt = attempt === 0
         ? basePrompt
-        : `${basePrompt}\n\nPrevious attempt returned invalid JSON. Return ONLY a compact JSON object with the four fields, no markdown, no truncation. Shorten the code if needed but keep it valid.`;
+        : attempt === 1
+          ? `${basePrompt}\n\nPrevious attempt returned invalid JSON. Return ONLY a compact JSON object with the four fields, no markdown, no truncation. Every field must be a non-empty string (use "" only if truly nothing applies, never null). Shorten the code if needed but keep it valid.`
+          : COMPACT_PROMPT;
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         signal: controller.signal,
@@ -310,21 +332,25 @@ Selected UI: ${JSON.stringify(selection).slice(0, 24000)}`;
         tail: redactSecrets(content.slice(-300))
       });
       parsed = extractJsonObject(content);
+      // Boş reactCode ile devam etme: işe yaramaz sonuç yerine retry'e bırak.
+      if (parsed && (typeof parsed.reactCode !== 'string' || parsed.reactCode.trim().length === 0)) {
+        parsed = null;
+      }
     }
     if (!parsed) {
       logFailure({ model: activeModel, stage: 'parse', attempts });
-      res.status(502).json({ error: 'Groq valid JSON döndürmedi.' });
+      res.status(502).json({ error: 'Groq geçerli kod üretemedi. Daha küçük bir öğe seçip veya başka bir modelle tekrar deneyin.' });
       return;
     }
-    const analysis = sanitizeAnalysis(parsed);
+    const analysis = sanitizeAnalysis(parsed, activeLanguage);
     if (!analysis) {
       logFailure({
         model: activeModel,
         stage: 'sanitize',
-        parsedKeys: Object.keys(parsed || {}),
+        fieldLengths: fieldLengths(parsed),
         attempts: attempts.map((a) => ({ finishReason: a.finishReason, contentLength: a.contentLength }))
       });
-      res.status(502).json({ error: 'Groq valid JSON döndürmedi.' });
+      res.status(502).json({ error: 'Groq geçerli kod üretemedi. Daha küçük bir öğe seçip veya başka bir modelle tekrar deneyin.' });
       return;
     }
 

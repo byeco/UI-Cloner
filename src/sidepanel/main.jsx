@@ -5,16 +5,37 @@ import { translations } from '../i18n';
 import '../styles.css';
 
 const DEFAULT_MODEL = 'openai/gpt-oss-120b';
+// Varsayılan Proxy: kullanıcının anahtarı gerekmez, BYECO paylaşılan
+// kotasından çalışır. Kendi anahtarını kullanmak isteyen Ayarlar'dan
+// Direct moda geçebilir.
 const DEFAULT_API_MODE = 'proxy';
-// BYECO AI sunucunun herkese açık adresi. Dagitimdan ÖNCE kendi adresini yaz,
-// örn: 'https://byeco-ai.onrender.com' (sonunda /api/analyze YOK).
-// Kullanıcılar sunucu/terminal görmez; eklenti buraya bağlanır.
-const PROXY_API_URL = 'http://localhost:8787';
+// Hangi yapımla çalışıldığını teşhis için başlıkta gösterilir.
+const EXT_VERSION = (() => {
+  try {
+    return (typeof chrome !== 'undefined' && chrome.runtime?.getManifest?.()?.version) || '1.1.0';
+  } catch { return '1.1.0'; }
+})();
+// Uzantıya build anında gömülen paylaşılan Groq anahtarı (.env'deki
+// VITE_SHARED_GROQ_KEY'den gelir). Kaynak repo temiz kalır; anahtar
+// yalnızca derlenen dist/zip içinde olur. Sunucu gerektirmez: UI Cloner AI
+// modu önce (ileride deploy edilirse) proxy'yi dener, ulaşamazsa bu
+// anahtarla Groq'a direkt bağlanır. Kendi anahtarını kullanmak isteyen
+// Direct moda geçer.
+const SHARED_GROQ_KEY = import.meta.env.VITE_SHARED_GROQ_KEY || '';
+// Anahtar build'e gömülmediyse paylaşılan yol tamamen yokmuş gibi davranır:
+// bu yapıyı inceleyen kimse token bulamaz (kota istenirse proxy/kişisel
+// anahtar kullanılır). Bkz: `npm run verify-dist`.
+// (İsteğe bağlı) ileride deploy edilecek UI Cloner AI sunucusunun adresi.
+// Deploy edilene kadar localhost'ta kalır; uzantı ona ulaşamazsa
+// otomatik olarak gömülü paylaşılan anahtara düşer, kullanıcı
+// hiçbir şey yapmaz.
+const DEFAULT_PROXY_URL = 'http://localhost:8787';
+// Chrome Web Store sayfası (puan/yorum istekleri buraya gider).
+const STORE_REVIEWS_URL = 'https://chromewebstore.google.com/detail/byeco-ui-cloner/cjoleiibiemifjpccfiiokmelmlmhcjb/reviews?hl=tr';
 const VALID_MODELS = [
   'openai/gpt-oss-120b',
-  'qwen/qwen3.8-27b',
-  'groq/compound',
-  'groq/compound-mini'
+  'openai/gpt-oss-20b',
+  'qwen/qwen3.8-27b'
 ];
 
 function getModelLimitSummary(modelName, lang = 'tr') {
@@ -34,30 +55,21 @@ function getModelLimitSummary(modelName, lang = 'tr') {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const MODEL_ACCESS = {
-  'groq/compound': {
-    tier: 'free',
-    label: 'Ücretsiz',
-    shortLabel: 'Ücretsiz',
-    requestsPerMinute: 30,
-    requestsPerDay: null,
-    tokensPerMinute: 70000,
-    tokensPerDay: null
-  },
-  'groq/compound-mini': {
-    tier: 'free',
-    label: 'Ücretsiz',
-    shortLabel: 'Ücretsiz',
-    requestsPerMinute: 30,
-    requestsPerDay: null,
-    tokensPerMinute: 70000,
-    tokensPerDay: null
-  },
   'openai/gpt-oss-120b': {
     tier: 'paid',
     label: 'Günlük hak',
     shortLabel: '5/gün',
     requestsPerMinute: 30,
     requestsPerDay: 5,
+    tokensPerMinute: 8000,
+    tokensPerDay: 200000
+  },
+  'openai/gpt-oss-20b': {
+    tier: 'paid',
+    label: 'Günlük hak',
+    shortLabel: '10/gün',
+    requestsPerMinute: 30,
+    requestsPerDay: 10,
     tokensPerMinute: 8000,
     tokensPerDay: 200000
   },
@@ -107,8 +119,18 @@ function compactSelection(selection) {
   };
 }
 
-function getModelErrorMessage(payload, lang) {
+function getModelErrorMessage(payload, lang, status = 0) {
   const message = payload?.error?.message || payload?.error || '';
+  if (status === 401 || /invalid.*key|incorrect api key|unauthorized/i.test(String(message))) {
+    return lang === 'tr'
+      ? `Groq anahtarı geçersiz (401). Ayarlar'daki anahtarı kontrol edin: "gsk_" ile başlamalı, boşluksuz olmalı.`
+      : `Groq key is invalid (401). Check the key in Settings: it must start with "gsk_" and have no spaces.`;
+  }
+  if (status === 404 || /model.*not found|does not exist/i.test(String(message))) {
+    return lang === 'tr'
+      ? `Model bulunamadı (404). Ayarlar'dan başka bir model seçin (örn. OpenAI GPT-OSS 20B).`
+      : `Model not found (404). Pick another model in Settings (e.g. OpenAI GPT-OSS 20B).`;
+  }
   const retryMatch = String(message).match(/try again in ([\d.]+)s/i);
   if (retryMatch) {
     return lang === 'tr'
@@ -117,10 +139,16 @@ function getModelErrorMessage(payload, lang) {
   }
   if (/tokens per minute|request too large|too large/i.test(String(message))) {
     return lang === 'tr'
-      ? 'Bu istek modelin dakika başı token limitini aşıyor. Daha küçük bir öğe seçin veya Groq Compound Mini modelini deneyin.'
-      : 'This request exceeds the model token limit. Select a smaller element or try Groq Compound Mini.';
+      ? 'Bu istek modelin dakika başı token limitini aşıyor. Daha küçük bir öğe seçin veya başka bir model deneyin.'
+      : 'This request exceeds the model token limit. Select a smaller element or try another model.';
   }
-  return message || (lang === 'tr' ? 'Yapay zeka isteği başarısız oldu.' : 'AI request failed.');
+  const detail = String(message).slice(0, 220);
+  if (status) {
+    return lang === 'tr'
+      ? `Yapay zeka isteği başarısız (HTTP ${status})${detail ? `: ${detail}` : '. Tekrar deneyin.'}`
+      : `AI request failed (HTTP ${status})${detail ? `: ${detail}` : '. Please try again.'}`;
+  }
+  return detail || (lang === 'tr' ? 'Yapay zeka isteği başarısız oldu.' : 'AI request failed.');
 }
 
 function parseModelJson(content, lang) {
@@ -179,6 +207,123 @@ function formatCountdown(ms) {
   const min = Math.floor(totalSec / 60);
   const sec = totalSec % 60;
   return `${min}:${sec < 10 ? '0' : ''}${sec}`;
+}
+
+// --- Yeni özellik yardımcıları: palet, önizleme, dışa aktar, iyileştirme ---
+function rgbToHex(colorStr) {
+  if (!colorStr || typeof colorStr !== 'string') return null;
+  const s = colorStr.trim().toLowerCase();
+  if (s === 'transparent' || s === 'rgba(0, 0, 0, 0)') return null;
+  if (/^#[0-9a-f]{3,8}$/.test(s)) {
+    if (s.length === 4) return `#${s[1]}${s[1]}${s[2]}${s[2]}${s[3]}${s[3]}`.toUpperCase();
+    return s.slice(0, 7).toUpperCase();
+  }
+  const m = s.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+  if (!m) return null;
+  if (m[4] !== undefined && parseFloat(m[4]) === 0) return null;
+  const toHex = (n) => Math.max(0, Math.min(255, parseInt(n, 10))).toString(16).padStart(2, '0');
+  return `#${toHex(m[1])}${toHex(m[2])}${toHex(m[3])}`.toUpperCase();
+}
+
+function extractPalette(selection) {
+  const colors = new Map(); // hex -> { hex, count, roles:Set }
+  const fonts = new Map();
+  const push = (hex, role) => {
+    if (!hex) return;
+    if (!colors.has(hex)) colors.set(hex, { hex, count: 0, roles: new Set() });
+    const e = colors.get(hex);
+    e.count += 1;
+    if (role) e.roles.add(role);
+  };
+  const walk = (node, isRoot) => {
+    if (!node) return;
+    const st = node.style || (isRoot ? selection?.style : null) || {};
+    push(rgbToHex(st.backgroundColor), 'bg');
+    push(rgbToHex(st.color), 'text');
+    const b = String(st.border || '');
+    const bm = b.match(/rgba?\([^)]+\)|#[0-9a-fA-F]{3,8}/);
+    if (bm) push(rgbToHex(bm[0]), 'border');
+    if (st.fontFamily || st.fontSize) {
+      const key = `${(st.fontFamily || 'sistem').split(',')[0].replace(/["']/g, '').trim()} • ${st.fontSize || ''} • ${st.fontWeight || ''}`;
+      fonts.set(key, (fonts.get(key) || 0) + 1);
+    }
+    (node.children || []).forEach((c) => walk(c, false));
+  };
+  if (selection) {
+    walk({ style: selection.style, children: selection.children }, true);
+    // kökün kendi stilleri walk içinde bir kez sayılsın
+  }
+  return {
+    colors: [...colors.values()].sort((a, b) => b.count - a.count).slice(0, 12)
+      .map((c) => ({ hex: c.hex, count: c.count, roles: [...c.roles] })),
+    fonts: [...fonts.entries()].map(([label, count]) => ({ label, count })).slice(0, 6)
+  };
+}
+
+function downloadFile(filename, content, mime = 'text/plain') {
+  try {
+    const blob = new Blob([content ?? ''], { type: `${mime};charset=utf-8` });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  } catch (err) {
+    console.error('Download failed:', err);
+  }
+}
+
+function buildPreviewDoc(htmlSnippet, cssCode, pageUrl) {
+  const safeHtml = String(htmlSnippet || '<div style="padding:24px;font-family:sans-serif">Seçim boş</div>');
+  const safeCss = String(cssCode || '');
+  const base = pageUrl ? `<base href="${String(pageUrl).replace(/"/g, '&quot;')}">` : '';
+  // Köprü kural: seçili öğenin sınıfı yoksa üretilen CSS'teki kök seçici
+  // (örn. `.button-component`) snippet'te hiçbir şeyle eşleşmez ve önizleme
+  // stylesiz kalır. İlk kuralın bildirimlerini sarmalayıcının ilk
+  // çocuğuna da uygula — sınıflı durumda her iki kural da çalışır.
+  let bridge = '';
+  const firstBlock = safeCss.match(/^[^{]+\{[^}]*\}/);
+  if (firstBlock) {
+    bridge = `.byeco-live-root > :first-child {${firstBlock[0].slice(firstBlock[0].indexOf('{') + 1)}}`;
+  }
+  return `<!doctype html><html><head><meta charset="utf-8">${base}<meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;padding:20px;background:#f1f5f9;font-family:system-ui,sans-serif}img{max-width:100%}* {box-sizing:border-box} ${safeCss} ${bridge}</style></head><body><div class="byeco-live-root">${safeHtml}</div></body></html>`;
+}
+
+function getA11yChecks(selection) {
+  const out = [];
+  if (!selection) return out;
+  const attrs = selection.attributes || {};
+  const text = (selection.text || '').trim();
+  const tag = (selection.tagName || '').toLowerCase();
+  if (tag === 'img' && !attrs.alt) out.push({ level: 'warn', text: 'img etiketinde alt metni yok — ekran okuyucular için alt ekleyin.' });
+  else out.push({ level: 'ok', text: 'Metin/img temelleri mevcut görünüyor.' });
+  if (!attrs['aria-label'] && !attrs.role && ['div', 'span'].includes(tag) && (selection.totalChildren || 0) > 3)
+    out.push({ level: 'warn', text: 'Etkileşimli görünüyorsa role / aria-label ekleyin (div yığını).' });
+  if (!text && (selection.children || []).length === 0)
+    out.push({ level: 'warn', text: 'Metin içeriği yok — buton ise aria-label şart.' });
+  const fs = parseFloat(selection.style?.fontSize || '');
+  if (fs && fs < 12) out.push({ level: 'warn', text: `Yazı boyutu küçük (${selection.style.fontSize}) — en az 12px önerilir.` });
+  else out.push({ level: 'ok', text: 'Yazı boyutu okunabilir aralıkta.' });
+  out.push({ level: 'ok', text: 'Odak görünürlüğü için :focus-visible stili ekleyin.' });
+  return out;
+}
+
+function buildDarkVariant(reactCode) {
+  if (!reactCode) return '';
+  return reactCode
+    .replaceAll('bg-white', 'bg-slate-950 dark:bg-slate-950')
+    .replaceAll('bg-gray-50', 'bg-slate-900')
+    .replaceAll('text-gray-900', 'text-slate-100')
+    .replaceAll('text-gray-800', 'text-slate-200')
+    .replaceAll('text-black', 'text-white')
+    .replaceAll('border-gray-200', 'border-slate-800');
+}
+
+function buildResponsiveNote() {
+  return `// Responsive: köke "w-full max-w-xl mx-auto px-4 sm:px-6" ekleyin;\n// eylem satırına "flex flex-col sm:flex-row gap-3" verin;\n// görsele "w-full h-auto object-cover" uygulayın.`;
 }
 
 async function getStorageItem(key) {
@@ -247,9 +392,45 @@ function SidePanel() {
   const [analysis, setAnalysis] = useState(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showAiReadyToast, setShowAiReadyToast] = useState(false);
-  const [activeTab, setActiveTab] = useState('ai'); // 'ai' | 'raw'
+  // AI hazır bildirimi sağ üstte belirip 4 sn sonra kendiliğinden kapanır.
+  useEffect(() => {
+    if (!showAiReadyToast) return;
+    const id = setTimeout(() => setShowAiReadyToast(false), 4000);
+    return () => clearTimeout(id);
+  }, [showAiReadyToast]);
+  const [activeTab, setActiveTab] = useState('ai'); // 'ai' | 'raw' | 'settings'
   const [subTab, setSubTab] = useState('split'); // 'split' | 'jsx' | 'css' | 'tailwind'
   const [cache, setCache] = useState({});
+
+  // Yeni özellik state'leri
+  const [history, setHistory] = useState([]);
+  const [showHistoryPage, setShowHistoryPage] = useState(false);
+  const [variant, setVariant] = useState('dark'); // 'dark' | 'responsive' | 'a11y'
+  const [variantOutput, setVariantOutput] = useState('');
+  // Araç sayfası (0: önizleme, 1: palet, 2: iyileştirme, 3: dışa aktar)
+  const [toolIndex, setToolIndex] = useState(0);
+  const [toolDir, setToolDir] = useState(1);
+  const [showReviewNudge, setShowReviewNudge] = useState(false);
+  const goTool = (delta) => {
+    setToolDir(delta >= 0 ? 1 : -1);
+    setToolIndex((i) => (i + delta + 4) % 4);
+  };
+  const dismissReviewNudge = async () => {
+    setShowReviewNudge(false);
+    await setStorageItem('byecoReviewNudgeDismissed', true);
+  };
+  const openStoreReview = async () => {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
+        await chrome.tabs.create({ url: STORE_REVIEWS_URL });
+      } else {
+        window.open(STORE_REVIEWS_URL, '_blank', 'noopener');
+      }
+    } catch {
+      window.open(STORE_REVIEWS_URL, '_blank', 'noopener');
+    }
+    await dismissReviewNudge();
+  };
 
   // AI Quota State: per-model usage history { [model]: [{timestamp, tokens}] }
   const [usageHistory, setUsageHistory] = useState({});
@@ -263,19 +444,24 @@ function SidePanel() {
   // Settings Modal State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [apiKey, setApiKey] = useState('');
-  const [apiMode, setApiMode] = useState('direct');
+  const [apiMode, setApiMode] = useState(DEFAULT_API_MODE);
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [savedSettingsNotice, setSavedSettingsNotice] = useState(false);
+  const [proxyOnline, setProxyOnline] = useState(null); // null | true | false
+  // Dağıtımda kodda yazılı adresten gelir; geliştirici isterse Ayarlar >
+  // Gelişmiş bölümünden geçersiz kılabilir (byecoProxyUrl).
+  const [proxyUrl, setProxyUrl] = useState(DEFAULT_PROXY_URL);
 
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape' && isSettingsOpen) {
-        setIsSettingsOpen(false);
-      }
+      if (e.key !== 'Escape') return;
+      if (showHistoryPage) { setShowHistoryPage(false); return; }
+      if (activeTab === 'settings' && selection) setActiveTab('ai');
+      else if (isSettingsOpen) setIsSettingsOpen(false);
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isSettingsOpen]);
+  }, [activeTab, isSettingsOpen, selection, showHistoryPage]);
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -283,13 +469,27 @@ function SidePanel() {
       const storedKey = await getStorageItem('groqApiKey');
       const storedMode = await getStorageItem('groqApiMode');
       const storedModel = await getStorageItem('groqModel');
+      const storedProxyUrl = await getStorageItem('byecoProxyUrl');
       const storedHistory = await getStorageItem('aiUsageHistory');
+      const storedPanelHistory = await getStorageItem('byecoHistory');
 
       if (storedLang) setLang(storedLang);
       if (storedKey) setApiKey(storedKey);
-      const initialMode = storedMode === 'direct' || storedMode === 'proxy'
+      if (typeof storedProxyUrl === 'string' && /^https?:\/\//.test(storedProxyUrl.trim())) {
+        setProxyUrl(storedProxyUrl.trim().replace(/\/+$/, ''));
+      }
+      let initialMode = storedMode === 'direct' || storedMode === 'proxy'
         ? storedMode
         : DEFAULT_API_MODE;
+      // Proxy anahtar gerektirmez: kayıtlı mod yoksa proxy'ye geç.
+      // Direct'te takılı kalıp anahtarı olmayan eski kurulumları da
+      // paylaşılan kotaya al (kullanıcı isterse Direct'e dönebilir).
+      if (!storedMode) {
+        initialMode = DEFAULT_API_MODE;
+      } else if (initialMode === 'direct' && !String(storedKey || '').trim()) {
+        initialMode = 'proxy';
+        await setStorageItem('groqApiMode', initialMode);
+      }
       setApiMode(initialMode);
       if (!storedMode) await setStorageItem('groqApiMode', initialMode);
       if (storedHistory && typeof storedHistory === 'object' && !Array.isArray(storedHistory)) {
@@ -297,6 +497,7 @@ function SidePanel() {
       } else if (Array.isArray(storedHistory)) {
         setUsageHistory({ [DEFAULT_MODEL]: storedHistory });
       }
+      if (Array.isArray(storedPanelHistory)) setHistory(storedPanelHistory.slice(0, 20));
       if (storedModel && VALID_MODELS.includes(storedModel)) {
         setModel(storedModel);
       } else {
@@ -316,6 +517,18 @@ function SidePanel() {
         setError('');
         setShowAiReadyToast(false);
         setActiveTab('ai');
+        setVariantOutput('');
+
+        const entry = {
+          id: `${Date.now()}`,
+          ts: Date.now(),
+          tagName: payload.tagName,
+          selector: payload.selector,
+          text: (payload.text || '').slice(0, 80),
+          dimensions: payload.dimensions,
+          selection: payload
+        };
+        setHistory((prev) => [entry, ...(prev || [])].slice(0, 20));
 
         if (payload.rect) {
           captureCroppedScreenshot(payload.rect).then((imgUrl) => {
@@ -334,13 +547,67 @@ function SidePanel() {
     }
   }, []);
 
+  // Geçmişi kalıcı sakla (updater içinde side-effect yapmadan)
+  useEffect(() => {
+    setStorageItem('byecoHistory', history).catch(() => {});
+  }, [history]);
+
+  // API anahtarını yazdıkça otomatik sakla: Kaydet'e basılmadan
+  // panel kapanırsa anahtar kaybolmasın (key=yok teşhisinin kök sebebi).
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setStorageItem('groqApiKey', apiKey.trim()).catch(() => {});
+    }, 500);
+    return () => clearTimeout(id);
+  }, [apiKey]);
+
+  // Proxy sağlık kontrolü: çevrimdışıysa buton altında net uyarı göster.
+  // Uzantı sunucuyu kendisi başlatamaz; adres dağıtımda hazır gelir,
+  // kullanıcı ekstra bir işlem yapmaz.
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      if (apiMode !== 'proxy') { setProxyOnline(null); return; }
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 4000);
+        const res = await fetch(`${proxyUrl}/health`, { signal: ctrl.signal });
+        clearTimeout(timer);
+        if (!cancelled) setProxyOnline(res.ok);
+      } catch {
+        if (!cancelled) setProxyOnline(false);
+      }
+    };
+    check();
+    const id = setInterval(check, 15000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [apiMode, proxyUrl]);
+
   const changeLanguage = async (newLang) => {
     setLang(newLang);
     await setStorageItem('appLanguage', newLang);
   };
 
+  // Ayarlar artık sekme/sayfa: seçim varken settings sekmesi, yoksa sayfa görünümü.
+  const openSettings = () => {
+    if (selection) {
+      setIsSettingsOpen(false);
+      setActiveTab('settings');
+      setTimeout(() => document.getElementById('setting-key')?.focus(), 120);
+    } else {
+      setIsSettingsOpen(true);
+    }
+  };
+  const closeSettings = () => {
+    setIsSettingsOpen(false);
+    if (selection) setActiveTab('ai');
+  };
+
   const saveSettings = async (e) => {
     if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    const normalizedProxy = String(proxyUrl || '').trim().replace(/\/+$/, '') || DEFAULT_PROXY_URL;
+    setProxyUrl(normalizedProxy);
+    await setStorageItem('byecoProxyUrl', normalizedProxy);
     await setStorageItem('appLanguage', lang);
     await setStorageItem('groqApiKey', apiKey.trim());
     await setStorageItem('groqApiMode', apiMode);
@@ -359,8 +626,10 @@ function SidePanel() {
 
     await setStorageItem('groqApiKey', '');
     await setStorageItem('aiUsageHistory', {});
+    await setStorageItem('byecoHistory', []);
     setApiKey('');
     setUsageHistory({});
+    setHistory([]);
     setCache({});
     setAnalysis(null);
     setScreenshot(null);
@@ -435,6 +704,50 @@ function SidePanel() {
   const jsx = style ? elementToJsx(selection, style) : '';
   const pureCss = selection ? generatePureCss(selection) : '';
   const cssCode = analysis?.pureCss || pureCss;
+  const palette = selection ? extractPalette(selection) : { colors: [], fonts: [] };
+  const a11yChecks = selection ? getA11yChecks(selection) : [];
+  const previewDoc = selection ? buildPreviewDoc(selection.htmlSnippet, cssCode, selection.pageUrl) : '';
+
+  const slugify = (s) => String(s || 'bilesen').toLowerCase().replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'bilesen';
+  const exportBase = selection ? `${slugify(selection.tagName)}-${selection.dimensions?.width || 0}x${selection.dimensions?.height || 0}` : 'bilesen';
+  const handleExport = (kind) => {
+    if (!selection) return;
+    if (kind === 'jsx') downloadFile(`${exportBase}.jsx`, analysis?.reactCode || jsx, 'text/jsx');
+    else if (kind === 'css') downloadFile(`${exportBase}.css`, cssCode, 'text/css');
+    else if (kind === 'json') downloadFile(`${exportBase}.json`, JSON.stringify({ selector: selection.selector, dimensions: selection.dimensions, tailwind, jsx, css: cssCode, analysis }, null, 2), 'application/json');
+    else if (kind === 'all') {
+      copyOutput('all', `${analysis?.reactCode || jsx}\n\n/* ===== ${exportBase}.css ===== */\n${cssCode}`);
+    }
+    setCopied(kind === 'all' ? 'all' : copied);
+  };
+  const applyVariant = (kind) => {
+    setVariant(kind);
+    if (kind === 'dark') setVariantOutput(buildDarkVariant(analysis?.reactCode || jsx) || (lang === 'tr' ? 'Önce kod üretin.' : 'Generate code first.'));
+    else if (kind === 'responsive') setVariantOutput(buildResponsiveNote());
+    else setVariantOutput('');
+  };
+  const restoreFromHistory = (item) => {
+    if (!item?.selection) return;
+    setSelection(item.selection);
+    setScreenshot(null);
+    setAnalysis(item.reactCode ? { summary: item.summary, reactCode: item.reactCode, pureCss: item.pureCss, model } : null);
+    setError('');
+    setActiveTab('ai');
+    setShowHistoryPage(false);
+    setVariantOutput('');
+    if (item.selection.rect) {
+      captureCroppedScreenshot(item.selection.rect).then((imgUrl) => { if (imgUrl) setScreenshot(imgUrl); });
+    }
+  };
+  const removeHistoryItem = async (id) => {
+    const next = (history || []).filter((h) => h.id !== id);
+    setHistory(next);
+    await setStorageItem('byecoHistory', next);
+  };
+  const clearHistory = async () => {
+    setHistory([]);
+    await setStorageItem('byecoHistory', []);
+  };
 
   const isSharedProxy = apiMode === 'proxy';
   const quotaSnapshot = getUsageSnapshot(model, usageHistory);
@@ -479,56 +792,65 @@ function SidePanel() {
   };
 
   // Doğrudan Groq çağrısı (direct mod + proxy erişilemezken otomatik yedek).
+  // Sunucuyla aynı dayanıklılık: bozuk JSON'da onarım telkiniyle 2. deneme,
+  // vision yükü başarısızsa amiral gemisi modele düşüş.
   const callGroqDirect = async (key, targetModel, contentFor) => {
     let activeTargetModel = targetModel;
-    const isVision = activeTargetModel === 'qwen/qwen3.8-27b' && Boolean(screenshot);
+    const wantsVision = activeTargetModel === 'qwen/qwen3.8-27b' && Boolean(screenshot);
 
-    let response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-            model: activeTargetModel,
-            temperature: 0.2,
-            max_tokens: 4000,
-        messages: [
-          { role: 'system', content: 'You produce clean React functional components with Tailwind CSS in JSON format.' },
-          { role: 'user', content: contentFor(activeTargetModel) }
-        ]
-      })
-    });
-
-    // Vision modeli meşgulse otomatik olarak amiral gemisi 120B modeline geç
-    if (!response.ok && isVision) {
-      console.warn('Vision model busy, falling back to openai/gpt-oss-120b flagship model...');
-      activeTargetModel = 'openai/gpt-oss-120b';
-      response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const postChat = async (m, getContent) => {
+      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${key}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-              model: activeTargetModel,
-              temperature: 0.2,
-              max_tokens: 4000,
+          model: m,
+          temperature: 0.2,
+          max_tokens: 4000,
           messages: [
             { role: 'system', content: 'You produce clean React functional components with Tailwind CSS in JSON format.' },
-            { role: 'user', content: contentFor(activeTargetModel) }
+            { role: 'user', content: getContent(m) }
           ]
         })
       });
-    }
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch {
+        throw Object.assign(new Error(getModelErrorMessage(null, lang, response.status)), { status: response.status });
+      }
+      if (!response.ok) {
+        throw Object.assign(new Error(getModelErrorMessage(payload, lang, response.status)), { status: response.status });
+      }
+      return payload.choices?.[0]?.message?.content;
+    };
 
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(getModelErrorMessage(payload, lang));
-    }
+    const repairNudge = (m) => {
+      const base = contentFor(m);
+      const baseText = typeof base === 'string' ? base : base?.[0]?.text || '';
+      return `${baseText}\n\nPrevious attempt returned invalid JSON. Return ONLY a compact valid JSON object with exactly the four fields (summary, reactCode, pureCss, tailwindClasses). No markdown, no truncation; shorten the code if needed but keep it valid.`;
+    };
 
-    const content = payload.choices?.[0]?.message?.content;
-    return { ...parseModelJson(content, lang), model: activeTargetModel };
+    try {
+      const content = await postChat(activeTargetModel, contentFor);
+      try {
+        return { ...parseModelJson(content, lang), model: activeTargetModel };
+      } catch {
+        const retryContent = await postChat(activeTargetModel, repairNudge);
+        return { ...parseModelJson(retryContent, lang), model: activeTargetModel };
+      }
+    } catch (err) {
+      // Vision yükü başarısızsa (anahtar hatası değilse) amiral gemisine düş
+      if (wantsVision && activeTargetModel !== 'openai/gpt-oss-120b' && err.status !== 401) {
+        console.warn('Vision call failed, falling back to openai/gpt-oss-120b flagship model...');
+        activeTargetModel = 'openai/gpt-oss-120b';
+        const content = await postChat(activeTargetModel, contentFor);
+        return { ...parseModelJson(content, lang), model: activeTargetModel };
+      }
+      throw err;
+    }
   };
 
   const analyzeSelection = async () => {
@@ -618,11 +940,15 @@ Selected UI: ${promptSelectionJson}`;
             { type: 'text', text: compactPromptText },
             { type: 'image_url', image_url: { url: screenshot } }
           ]
-        : compactPromptText;
+        : promptText;
 
       if (apiMode === 'direct') {
         if (!apiKey.trim()) {
-          throw new Error(t.errNoKey);
+          openSettings();
+          setTimeout(() => document.getElementById('setting-key')?.focus(), 150);
+          throw new Error(lang === 'tr'
+            ? 'Groq anahtarı girilmedi. console.groq.com → API Keys’ten ücretsiz anahtar (gsk_…) alıp aşağıya yapıştır, Kaydet’e bas.'
+            : 'No Groq key yet. Get a free key (gsk_…) from console.groq.com → API Keys, paste it below and save.');
         }
 
         const activeTargetModel = VALID_MODELS.includes(model) ? model : DEFAULT_MODEL;
@@ -632,26 +958,43 @@ Selected UI: ${promptSelectionJson}`;
         let response;
         let proxyUnreachable = false;
         try {
-          response = await fetch(`${PROXY_API_URL}/api/analyze`, {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 6000);
+          response = await fetch(`${proxyUrl}/api/analyze`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ selection: promptSelection, model: activeTargetModel, language: lang })
+            body: JSON.stringify({ selection: promptSelection, model: activeTargetModel, language: lang }),
+            signal: ctrl.signal
           });
+          clearTimeout(timer);
         } catch {
           proxyUnreachable = true;
         }
         if (proxyUnreachable) {
-          // Sunucu kapalıysa sessizce yedek yola geç: kayıtlı anahtar varsa
-          // doğrudan dene. İkisi de yoksa Ayarlar'ı açıp anahtarı iste.
-          if (apiKey.trim()) {
+          // UI Cloner AI modu tam otomatik: proxy (deploy edildiyse) >
+          // gömülü paylaşılan anahtar > kullanıcının kendi anahtarı.
+          // Hiçbiri yoksa anahtar istemek için mod değiştirmeden
+          // Direct ayarına yönlendir.
+          setProxyOnline(false);
+          if (SHARED_GROQ_KEY) {
+            resultAnalysis = await callGroqDirect(SHARED_GROQ_KEY, activeTargetModel, userContent);
+          } else if (apiKey.trim()) {
             resultAnalysis = await callGroqDirect(apiKey.trim(), activeTargetModel, userContent);
           } else {
-            setIsSettingsOpen(true);
-            throw new Error(t.errNoKey);
+            openSettings();
+            setTimeout(() => document.getElementById('setting-key')?.focus(), 150);
+            throw new Error(lang === 'tr'
+              ? 'Paylaşılan kota bu yapımda yok. Ayarlar’dan kendi ücretsiz Groq anahtarını (gsk_…) girip Direct moda geç.'
+              : 'No shared quota in this build. Add your own free Groq key (gsk_…) in Settings and switch to Direct.');
           }
         } else {
-          const payload = await response.json();
-          if (!response.ok) throw new Error(getModelErrorMessage(payload, lang) || t.errServer);
+          let payload = null;
+          try {
+            payload = await response.json();
+          } catch {
+            throw new Error(getModelErrorMessage(null, lang, response.status));
+          }
+          if (!response.ok) throw new Error(getModelErrorMessage(payload, lang, response.status) || t.errServer);
           resultAnalysis = { ...payload.analysis, model: activeTargetModel };
         }
       }
@@ -659,6 +1002,21 @@ Selected UI: ${promptSelectionJson}`;
       setAnalysis(resultAnalysis);
       setCache((prev) => ({ ...prev, [cacheKey]: resultAnalysis }));
       setShowAiReadyToast(true);
+      // 2. başarılı üretimden sonra nazik yorum hatırlatıcısı (tek seferlik).
+      try {
+        const prior = Number(await getStorageItem('byecoSuccessCount') || 0);
+        const total = prior + 1;
+        await setStorageItem('byecoSuccessCount', total);
+        const dismissed = await getStorageItem('byecoReviewNudgeDismissed');
+        if (total >= 2 && !dismissed) setShowReviewNudge(true);
+      } catch { /* sayaç kritik değil */ }
+      setProxyOnline((prev) => (apiMode === 'proxy' ? true : prev));
+      setHistory((prev) => {
+        if (!prev || prev.length === 0) return prev;
+        return prev.map((h, i) => i === 0
+          ? { ...h, summary: resultAnalysis.summary, reactCode: resultAnalysis.reactCode, pureCss: resultAnalysis.pureCss }
+          : h);
+      });
 
       if (isSharedProxy) {
         const approximateTokens = estimateRequestTokens(promptSelectionJson) + 1400;
@@ -680,11 +1038,254 @@ Selected UI: ${promptSelectionJson}`;
     }
   };
 
+  // Geçmiş sayfası: başlık butonuna basınca açılan ayrı görünüm.
+  const renderHistoryPage = () => (
+    <section className="settings-page">
+      <div className="settings-page-head">
+        <div className="settings-page-title-group">
+          <strong>{lang === 'tr' ? '🕘 Geçmiş' : '🕘 History'}</strong>
+          <span className="drawer-count">{history.length}/20</span>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {history.length > 0 && (
+            <button type="button" className="mini-btn danger" onClick={clearHistory}>
+              {lang === 'tr' ? 'Temizle' : 'Clear'}
+            </button>
+          )}
+          <button type="button" className="mini-btn" onClick={() => setShowHistoryPage(false)}>
+            ← {lang === 'tr' ? 'Geri' : 'Back'}
+          </button>
+        </div>
+      </div>
+      {(history || []).length === 0 ? (
+        <p style={{ margin: '12px 2px', fontSize: 12, color: '#8fa6bf' }}>
+          {lang === 'tr' ? 'Henüz geçmiş yok. Bir öğe seçince burada listelenir.' : 'No history yet. Select an element and it will show up here.'}
+        </p>
+      ) : (
+        <div className="history-list history-page-list">
+          {history.map((h) => (
+            <div key={h.id} className="history-item">
+              <div className="history-item-main" onClick={() => restoreFromHistory(h)} title={lang === 'tr' ? 'Geri yüklemek için tıkla' : 'Click to restore'}>
+                <strong>&lt;{h.tagName}&gt; {h.dimensions?.width}×{h.dimensions?.height} {h.summary ? `• ${h.summary.slice(0, 60)}` : ''}</strong>
+                <small>{new Date(h.ts).toLocaleString()} • {(h.selector || '').slice(0, 60)}</small>
+              </div>
+              <div className="history-item-actions">
+                <button type="button" className="mini-btn" onClick={() => restoreFromHistory(h)}>↩</button>
+                <button type="button" className="mini-btn danger" onClick={() => removeHistoryItem(h.id)}>✕</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+
+  // Ayarlar sayfası: sekmeli görünümde ve seçim öncesi ekranda ortak kullanılır.
+  const renderSettingsPage = () => (
+    <section className="settings-page">
+      <div className="settings-page-head">
+        <div className="settings-page-title-group">
+          <div className="settings-modal-icon-badge">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </div>
+          <div>
+            <h2 className="settings-modal-title">{lang === 'tr' ? 'Ayarlar' : 'Settings'}</h2>
+            <p className="settings-modal-sub">
+              {lang === 'tr' ? 'Model ve bağlantı' : 'Model & connection'}
+            </p>
+          </div>
+        </div>
+        <button type="button" className="mini-btn" onClick={closeSettings}>
+          ← {lang === 'tr' ? 'Geri' : 'Back'}
+        </button>
+      </div>
+
+      <form onSubmit={saveSettings} className="settings-modal-body">
+        <div className="modal-field-group">
+          <div className="modal-label-row">
+            <label htmlFor="setting-model">{t.modelLabel}</label>
+            <span className="model-chip">{model.split('/')[1] || model}</span>
+          </div>
+          <select
+            id="setting-model"
+            value={model}
+            onChange={async (e) => {
+              const newModel = e.target.value;
+              setModel(newModel);
+              await setStorageItem('groqModel', newModel);
+            }}
+            className="modal-select"
+          >
+            <option value="openai/gpt-oss-120b">OpenAI GPT-OSS 120B — 5/gün</option>
+            <option value="openai/gpt-oss-20b">OpenAI GPT-OSS 20B — 10/gün</option>
+            <option value="qwen/qwen3.8-27b">Qwen 3.8 27B — 10/gün</option>
+          </select>
+          <span className="modal-field-hint">
+            {MODEL_ACCESS[model]?.tier === 'free'
+              ? (lang === 'tr' ? 'Ücretsiz • 30 istek/dk • 70K token/dk' : 'Free • 30 req/min • 70K tokens/min')
+              : (lang === 'tr' ? `${getModelLimitSummary(model, 'tr')}` : `${getModelLimitSummary(model, 'en')}`)}
+          </span>
+        </div>
+
+        <div className="modal-field-group">
+          <div className="modal-label-row">
+            <label htmlFor="setting-mode">{t.connectionMode}</label>
+            <span className={`status-pill ${apiMode === 'direct' ? 'direct' : 'proxy'}`}>
+              {apiMode === 'direct' ? 'BYOK Direct' : 'UI Cloner AI'}
+            </span>
+          </div>
+          <select
+            id="setting-mode"
+            value={apiMode}
+            onChange={async (e) => {
+              const newMode = e.target.value;
+              setApiMode(newMode);
+              await setStorageItem('groqApiMode', newMode);
+            }}
+            className="modal-select"
+          >
+            <option value="proxy">{t.proxyMode}</option>
+            <option value="direct">{t.directMode}</option>
+          </select>
+          <span className="modal-field-hint">
+            {apiMode === 'direct' ? t.directModeHelp : t.proxyModeHelp}
+          </span>
+        </div>
+
+        {apiMode === 'proxy' && (
+          <details className="modal-field-group">
+            <summary style={{ cursor: 'pointer', fontSize: 12, color: '#8fa6bf' }}>
+              {lang === 'tr' ? 'Gelişmiş: sunucu adresi' : 'Advanced: server address'}
+            </summary>
+            <input
+              id="setting-proxy-url"
+              type="url"
+              value={proxyUrl}
+              onChange={(e) => setProxyUrl(e.target.value)}
+              placeholder="https://byeco-ai.onrender.com"
+              className="modal-input"
+              autoComplete="off"
+              spellCheck="false"
+              style={{ marginTop: 8 }}
+            />
+            <span className="modal-field-hint">
+              {lang === 'tr'
+                ? 'Normalde dokunmayın; dağıtımda hazır gelir.'
+                : 'Usually untouched; preconfigured at build time.'}
+            </span>
+          </details>
+        )}
+
+        {apiMode === 'direct' && (
+          <div className="modal-field-group">
+            <label htmlFor="setting-key">{t.apiKeyLabel}</label>
+            <input
+              id="setting-key"
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="gsk_..."
+              className="modal-input"
+              autoComplete="off"
+              spellCheck="false"
+            />
+            <span className="modal-field-hint">{t.apiKeyHelp}</span>
+          </div>
+        )}
+
+        <section className="data-privacy-panel" aria-labelledby="data-privacy-title">
+          <div className="data-privacy-heading">
+            <div className="data-privacy-icon" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3 5 6v5c0 4.6 2.9 8.5 7 10 4.1-1.5 7-5.4 7-10V6l-7-3Z" />
+                <path d="m9 12 2 2 4-4" />
+              </svg>
+            </div>
+            <div>
+              <strong id="data-privacy-title">
+                {lang === 'tr' ? 'Verileriniz' : 'Your data'}
+              </strong>
+              <p>
+                {lang === 'tr' ? 'Her şey bu tarayıcıda tutulur.' : 'Everything stays in this browser.'}
+              </p>
+            </div>
+          </div>
+          <ul className="data-privacy-list">
+            <li>{lang === 'tr' ? 'Anahtar yalnızca yerel depolamada saklanır.' : 'Key is stored only locally.'}</li>
+            <li>{lang === 'tr' ? 'Seçim ve kod kalıcı kaydedilmez.' : 'Selections and code are not stored.'}</li>
+          </ul>
+          <button type="button" className="data-clear-btn" onClick={clearUserData}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 6h18" />
+              <path d="M8 6V4h8v2M19 6l-1 15H6L5 6" />
+              <path d="M10 11v6M14 11v6" />
+            </svg>
+            {lang === 'tr' ? 'Yerel verileri temizle' : 'Clear local data'}
+          </button>
+          <a
+            className="privacy-policy-link"
+            href="privacy.html"
+            target="_blank"
+            rel="noreferrer"
+          >
+            {lang === 'tr' ? 'Gizlilik politikası ve sözleşmeler' : 'Privacy policy and agreements'}
+            <span aria-hidden="true">↗</span>
+          </a>
+        </section>
+
+        <div className="settings-modal-footer">
+          <div className="modal-footer-status">
+            {savedSettingsNotice && (
+              <span className="save-toast-tag">✓ {t.savedSuccess}</span>
+            )}
+          </div>
+          <div className="modal-footer-buttons">
+            <button
+              type="button"
+              className="modal-cancel-btn"
+              onClick={closeSettings}
+            >
+              {lang === 'tr' ? 'Geri' : 'Back'}
+            </button>
+            <button type="submit" className="modal-save-btn">
+              💾 {t.saveSettings}
+            </button>
+          </div>
+        </div>
+      </form>
+    </section>
+  );
+
   return (
     <main className="panel-shell">
-      {/* Floating Confirmation Toast in Top-Right Corner */}
-      {savedSettingsNotice && (
+      {/* Floating Notifications in Top-Right Corner (timed, auto-dismiss) */}
+      {(savedSettingsNotice || showAiReadyToast) && (
         <aside className="floating-toast-container" role="status" aria-live="polite">
+          {showAiReadyToast && (
+            <div className="floating-toast-card">
+              <div className="toast-icon-circle">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              </div>
+              <div className="toast-content">
+                <strong className="toast-title">{t.aiReadyNotice}</strong>
+                <p className="toast-desc">{analysis?.model || model}</p>
+              </div>
+              <button
+                type="button"
+                className="toast-close-btn"
+                onClick={() => setShowAiReadyToast(false)}
+                aria-label={lang === 'tr' ? 'Bildirimi Kapat' : 'Dismiss'}
+              >
+                ✕
+              </button>
+            </div>
+          )}
+          {savedSettingsNotice && (
           <div className="floating-toast-card">
             <div className="toast-icon-circle">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
@@ -704,6 +1305,7 @@ Selected UI: ${promptSelectionJson}`;
               ✕
             </button>
           </div>
+          )}
         </aside>
       )}
 
@@ -714,6 +1316,7 @@ Selected UI: ${promptSelectionJson}`;
           <div className="brand-group">
             <span className="brand-dot" />
             <span className="brand-name">{t.brand}</span>
+            <span className="mono-tag" style={{ fontFamily: 'ui-monospace, monospace', fontSize: 9, color: '#67e8f9', background: '#0b2a3a', border: '1px solid #155e75', borderRadius: 4, padding: '1px 5px' }}>v{EXT_VERSION}</span>
           </div>
 
           {isInspecting && (
@@ -733,17 +1336,19 @@ Selected UI: ${promptSelectionJson}`;
         <div className="header-right">
           <button
             type="button"
-            className="lang-pill-btn"
+            className="lang-pill-btn lang-toggle"
             onClick={() => changeLanguage(lang === 'tr' ? 'en' : 'tr')}
             title="Dili Değiştir / Switch Language"
           >
-            {lang === 'tr' ? '🇹🇷 TR' : '🇬🇧 EN'}
+            <span className={lang === 'tr' ? 'on' : ''}>TR</span>
+            <span className="lang-sep">|</span>
+            <span className={lang === 'en' ? 'on' : ''}>EN</span>
           </button>
 
           <button
             type="button"
-            className={`settings-icon-btn ${isSettingsOpen ? 'active' : ''}`}
-            onClick={() => setIsSettingsOpen(true)}
+            className={`settings-icon-btn ${(activeTab === 'settings' || isSettingsOpen) ? 'active' : ''}`}
+            onClick={openSettings}
             title={lang === 'tr' ? 'Ayarlar' : 'Settings'}
             aria-label="Ayarlar"
           >
@@ -755,191 +1360,26 @@ Selected UI: ${promptSelectionJson}`;
         </div>
       </header>
 
-      {/* Modern High-End Settings Modal */}
-      {isSettingsOpen && (
-        <div className="modal-backdrop" onClick={() => setIsSettingsOpen(false)}>
-          <div
-            className="settings-modal"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
+      {false && null}
+
+      {error && (
+        <div className="notice" style={{ display: 'flex', gap: 8, alignItems: 'flex-start', justifyContent: 'space-between' }}>
+          <p style={{ margin: 0, flex: 1 }}>{error}</p>
+          <button
+            type="button"
+            className="mini-btn"
+            style={{ flexShrink: 0 }}
+            onClick={() => copyOutput('errdiag', `UI Cloner diag v${EXT_VERSION} | mode=${apiMode} | model=${model} | key=${apiKey.trim() ? 'var' : 'yok'} | proxy=${String(proxyOnline)} | err=${error}`)}
+            title={lang === 'tr' ? 'Teşhisi kopyala' : 'Copy diagnostics'}
           >
-            <div className="settings-modal-header">
-              <div className="settings-modal-title-group">
-                <div className="settings-modal-icon-badge">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="3" />
-                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                  </svg>
-                </div>
-                <div>
-                  <h2 className="settings-modal-title">{t.settingsTitle || 'Ayarlar'}</h2>
-                  <p className="settings-modal-sub">
-                    {lang === 'tr'
-                      ? 'Yapay zeka modeli, API anahtarı ve bağlantı yapılandırması'
-                      : 'AI model, API key and connection preferences'}
-                  </p>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                className="modal-close-btn"
-                onClick={() => setIsSettingsOpen(false)}
-                title={lang === 'tr' ? 'Kapat (ESC)' : 'Close (ESC)'}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
-            </div>
-
-            <form onSubmit={saveSettings} className="settings-modal-body">
-              <div className="modal-field-group">
-                <div className="modal-label-row">
-                  <label htmlFor="setting-model">{t.modelLabel}</label>
-                  <span className="model-chip">{model.split('/')[1] || model}</span>
-                </div>
-                <select
-                  id="setting-model"
-                  value={model}
-                  onChange={async (e) => {
-                    const newModel = e.target.value;
-                    setModel(newModel);
-                    await setStorageItem('groqModel', newModel);
-                  }}
-                  className="modal-select"
-                >
-                  <option value="openai/gpt-oss-120b">OpenAI GPT-OSS 120B — 5/gün</option>
-                  <option value="qwen/qwen3.8-27b">Qwen 3.8 27B — 10/gün</option>
-                  <option value="groq/compound">Groq Compound — Sınırsız</option>
-                  <option value="groq/compound-mini">Groq Compound Mini — Sınırsız</option>
-                </select>
-                <span className="modal-field-hint">
-                  {MODEL_ACCESS[model]?.tier === 'free'
-                    ? (lang === 'tr'
-                        ? 'Groq modelleri ücretsizdir. Günlük hak sınırsızdır; dakikada 30 istek ve 70K token limiti vardır.'
-                        : 'Groq models are free with unlimited daily requests; 30 req/min and 70K tokens/min limits still apply.')
-                    : (lang === 'tr'
-                        ? `${getModelLimitSummary(model, 'tr')}. Hak dolduğunda yeni gün beklenir.`
-                        : `${getModelLimitSummary(model, 'en')}. It resets with the next daily window.`)}
-                </span>
-              </div>
-
-              <div className="modal-field-group">
-                <div className="modal-label-row">
-                  <label htmlFor="setting-mode">{t.connectionMode}</label>
-                  <span className={`status-pill ${apiMode === 'direct' ? 'direct' : 'proxy'}`}>
-                    {apiMode === 'direct' ? 'BYOK Direct' : 'Proxy (8787)'}
-                  </span>
-                </div>
-                <select
-                  id="setting-mode"
-                  value={apiMode}
-                  onChange={async (e) => {
-                    const newMode = e.target.value;
-                    setApiMode(newMode);
-                    await setStorageItem('groqApiMode', newMode);
-                  }}
-                  className="modal-select"
-                >
-                  <option value="proxy">{t.proxyMode}</option>
-                  <option value="direct">{t.directMode}</option>
-                </select>
-                <span className="modal-field-hint">
-                  {apiMode === 'direct' ? t.directModeHelp : t.proxyModeHelp}
-                </span>
-              </div>
-
-              {apiMode === 'direct' && (
-                <div className="modal-field-group">
-                  <label htmlFor="setting-key">{t.apiKeyLabel}</label>
-                  <input
-                    id="setting-key"
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder="gsk_..."
-                    className="modal-input"
-                    autoComplete="off"
-                    spellCheck="false"
-                  />
-                  <span className="modal-field-hint">{t.apiKeyHelp}</span>
-                </div>
-              )}
-
-              <section className="data-privacy-panel" aria-labelledby="data-privacy-title">
-                <div className="data-privacy-heading">
-                  <div className="data-privacy-icon" aria-hidden="true">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M12 3 5 6v5c0 4.6 2.9 8.5 7 10 4.1-1.5 7-5.4 7-10V6l-7-3Z" />
-                      <path d="m9 12 2 2 4-4" />
-                    </svg>
-                  </div>
-                  <div>
-                    <strong id="data-privacy-title">
-                      {lang === 'tr' ? 'Verileriniz' : 'Your data'}
-                    </strong>
-                    <p>
-                      {lang === 'tr'
-                        ? 'Ayarlar ve kullanım sayacı bu tarayıcıda tutulur.'
-                        : 'Settings and usage counters stay in this browser.'}
-                    </p>
-                  </div>
-                </div>
-                <ul className="data-privacy-list">
-                  <li>{lang === 'tr' ? 'API anahtarı yalnızca yerel depolamada saklanır.' : 'The API key is stored only in local storage.'}</li>
-                  <li>{lang === 'tr' ? 'Seçtiğiniz öğe ve üretilen kod kalıcı olarak kaydedilmez.' : 'Selected elements and generated code are not stored permanently.'}</li>
-                  <li>{lang === 'tr' ? 'Proxy modunda istekler seçtiğiniz sunucu üzerinden Groq’a gönderilir.' : 'In proxy mode, requests go to Groq through your configured server.'}</li>
-                </ul>
-                <button type="button" className="data-clear-btn" onClick={clearUserData}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M3 6h18" />
-                    <path d="M8 6V4h8v2M19 6l-1 15H6L5 6" />
-                    <path d="M10 11v6M14 11v6" />
-                  </svg>
-                  {lang === 'tr' ? 'Yerel verileri temizle' : 'Clear local data'}
-                </button>
-                <a
-                  className="privacy-policy-link"
-                  href="privacy.html"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {lang === 'tr' ? 'Gizlilik politikası ve sözleşmeler' : 'Privacy policy and agreements'}
-                  <span aria-hidden="true">↗</span>
-                </a>
-              </section>
-
-              <div className="settings-modal-footer">
-                <div className="modal-footer-status">
-                  {savedSettingsNotice && (
-                    <span className="save-toast-tag">✓ {t.savedSuccess}</span>
-                  )}
-                </div>
-                <div className="modal-footer-buttons">
-                  <button
-                    type="button"
-                    className="modal-cancel-btn"
-                    onClick={() => setIsSettingsOpen(false)}
-                  >
-                    {lang === 'tr' ? 'Kapat' : 'Close'}
-                  </button>
-                  <button type="submit" className="modal-save-btn">
-                    💾 {t.saveSettings}
-                  </button>
-                </div>
-              </div>
-            </form>
-          </div>
+            {copied === 'errdiag' ? '✓' : (lang === 'tr' ? '⧉ Kopyala' : '⧉ Copy')}
+          </button>
         </div>
       )}
 
-      {error && <p className="notice">{error}</p>}
-
-      {/* Empty State */}
-      {!selection ? (
+      {/* Empty State / Settings / History */}
+      {showHistoryPage ? renderHistoryPage() : (!selection ? (
+        isSettingsOpen ? renderSettingsPage() : (
         <section className="empty-state">
           <div className="empty-state-card">
             <div className="empty-target-ring">
@@ -969,27 +1409,65 @@ Selected UI: ${promptSelectionJson}`;
                 </>
               )}
             </button>
+            {history.length > 0 && (
+              <button
+                type="button"
+                className="mini-btn"
+                style={{ marginTop: 10 }}
+                onClick={() => setShowHistoryPage(true)}
+              >
+                🕘 {lang === 'tr' ? `Geçmiş (${history.length})` : `History (${history.length})`}
+              </button>
+            )}
             <div className="quick-start-guide" aria-label={lang === 'tr' ? 'Hızlı kullanım rehberi' : 'Quick start guide'}>
-              <div className="quick-start-heading">
-                {lang === 'tr' ? 'Nasıl kullanılır?' : 'How it works'}
+              <div className="quick-start-head">
+                <span className="quick-start-heading">
+                  {lang === 'tr' ? 'Nasıl çalışır?' : 'How it works'}
+                </span>
+                <span className="quick-start-badge">3 {lang === 'tr' ? 'adım' : 'steps'}</span>
               </div>
               <div className="quick-start-steps">
                 <div className="quick-start-step">
-                  <span className="quick-start-number">1</span>
-                  <span>{lang === 'tr' ? 'Öğe seç' : 'Select an element'}</span>
+                  <span className="quick-start-icon" aria-hidden="true">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="9" />
+                      <circle cx="12" cy="12" r="2.5" />
+                      <path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21" />
+                    </svg>
+                  </span>
+                  <span className="quick-start-text">
+                    <strong><span className="quick-start-number">01</span>{lang === 'tr' ? 'Öğe seç' : 'Inspect'}</strong>
+                    <small>{lang === 'tr' ? 'Sayfadan bileşeni işaretle' : 'Pick any element'}</small>
+                  </span>
                 </div>
                 <div className="quick-start-step">
-                  <span className="quick-start-number">2</span>
-                  <span>{lang === 'tr' ? 'AI ile kodu üret' : 'Generate with AI'}</span>
+                  <span className="quick-start-icon" aria-hidden="true">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M13 2 4.5 13.5H11l-1 8.5L18.5 10.5H12l1-8.5Z" />
+                    </svg>
+                  </span>
+                  <span className="quick-start-text">
+                    <strong><span className="quick-start-number">02</span>{lang === 'tr' ? 'AI ile üret' : 'Generate'}</strong>
+                    <small>{lang === 'tr' ? 'React + Tailwind kodu al' : 'Get React + Tailwind'}</small>
+                  </span>
                 </div>
                 <div className="quick-start-step">
-                  <span className="quick-start-number">3</span>
-                  <span>{lang === 'tr' ? 'Kodu kopyala' : 'Copy the code'}</span>
+                  <span className="quick-start-icon" aria-hidden="true">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="9" y="9" width="12" height="12" rx="2" />
+                      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                    </svg>
+                  </span>
+                  <span className="quick-start-text">
+                    <strong><span className="quick-start-number">03</span>{lang === 'tr' ? 'Kopyala' : 'Copy'}</strong>
+                    <small>{lang === 'tr' ? 'Tek tıkla projene taşı' : 'Ship to your project'}</small>
+                  </span>
                 </div>
               </div>
             </div>
           </div>
         </section>
+        )
       ) : (
         <section className="workspace-container">
           {/* Primary Tabs + Reselect Action */}
@@ -1004,7 +1482,7 @@ Selected UI: ${promptSelectionJson}`;
                 </svg>
                 <span>{t.tabAi}</span>
                 <span className={`quota-tab-chip ${isQuotaReached ? 'depleted' : ''}`} title={t.quotaLeft}>
-                  {activeModelQuota.requestsPerDay === null ? 'Ücretsiz' : `${remainingQuota ?? 0}/${activeModelQuota.requestsPerDay}`}
+                  {activeModelQuota.requestsPerDay === null ? '∞' : `${remainingQuota ?? 0}/${activeModelQuota.requestsPerDay}`}
                 </span>
                 {isAnalyzing && <span className="tab-badge pulse">…</span>}
                 {analysis && !isAnalyzing && <span className="tab-badge ready">✓</span>}
@@ -1048,6 +1526,19 @@ Selected UI: ${promptSelectionJson}`;
             </div>
           </div>
 
+          {/* Geçmiş: butona basınca ayrı sayfa açılır */}
+          <div className="history-head">
+            <button
+              type="button"
+              className="history-head-btn"
+              onClick={() => setShowHistoryPage(true)}
+            >
+              <span className="history-chevron" aria-hidden="true">▸</span>
+              <strong>{lang === 'tr' ? '🕘 Geçmiş' : '🕘 History'}</strong>
+              <span className="drawer-count">{history.length}/20</span>
+            </button>
+          </div>
+
           {/* Secondary Sub-Tabs — only when Raw tab is active */}
           {activeTab === 'raw' && (
             <div className="sub-tabs-bar">
@@ -1073,18 +1564,6 @@ Selected UI: ${promptSelectionJson}`;
           {/* TAB 1: AI React Code (Pure Code Only) */}
           {activeTab === 'ai' && (
             <div className="tab-pane">
-              {showAiReadyToast && (
-                <div className="ai-ready-banner">
-                  <span>{t.aiReadyNotice}</span>
-                  <button
-                    style={{ background: 'none', border: 'none', color: '#6ee7b7', cursor: 'pointer', fontSize: '13px' }}
-                    onClick={() => setShowAiReadyToast(false)}
-                  >
-                    ✕
-                  </button>
-                </div>
-              )}
-
               {/* Area Screenshot Preview Thumbnail */}
               {screenshot && (
                 <div className="screenshot-preview-bar">
@@ -1154,7 +1633,7 @@ Selected UI: ${promptSelectionJson}`;
                         <>
                           <span>⚡</span>
                           <span>{t.analyzeAi}</span>
-                          <span className="ai-cta-model-tag">{model.includes('120b') ? '120B Flagship' : (model.includes('27b') ? 'Vision 27B' : 'Fast')}</span>
+                          <span className="ai-cta-model-tag">{model.includes('120b') ? '120B Flagship' : (model.includes('20b') ? '20B Hızlı' : (model.includes('27b') ? 'Vision 27B' : 'Fast'))}</span>
                         </>
                       ) : (
                         <>
@@ -1163,6 +1642,41 @@ Selected UI: ${promptSelectionJson}`;
                         </>
                       )}
                     </button>
+                    {apiMode === 'proxy' && proxyOnline === false && !SHARED_GROQ_KEY && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center', gap: 6, maxWidth: 440 }}>
+                        <small style={{ color: '#8fa6bf', fontSize: 11 }}>
+                          {lang === 'tr' ? 'Sunucuya ulaşılamıyor — kendi anahtarınla devam edebilirsin:' : 'Server is unreachable — you can continue with your own key:'}
+                        </small>
+                        <button
+                          type="button"
+                          className="tool-btn solid"
+                          onClick={async () => {
+                            setApiMode('direct');
+                            await setStorageItem('groqApiMode', 'direct');
+                            setActiveTab('settings');
+                          }}
+                        >
+                          {lang === 'tr' ? '🔑 Direct moda geç' : '🔑 Switch to Direct'}
+                        </button>
+                        <button
+                          type="button"
+                          className="tool-btn"
+                          onClick={async () => {
+                            try {
+                              const res = await fetch(`${proxyUrl}/health`);
+                              setProxyOnline(res.ok);
+                            } catch { setProxyOnline(false); }
+                          }}
+                        >
+                          {lang === 'tr' ? '↻ Tekrar dene' : '↻ Retry'}
+                        </button>
+                      </div>
+                    )}
+                    {apiMode === 'proxy' && proxyOnline === true && (
+                      <small style={{ color: '#6ee7b7', fontSize: 10.5 }}>
+                        {lang === 'tr' ? '● Sunucu çevrimiçi' : '● Server online'}
+                      </small>
+                    )}
                   </div>
                 </div>
               )}
@@ -1197,6 +1711,136 @@ Selected UI: ${promptSelectionJson}`;
                   </div>
                   <pre className="code-output">{analysis.reactCode}</pre>
                 </article>
+              )}
+
+              {showReviewNudge && !isAnalyzing && analysis && (
+                <div className="review-nudge" role="status">
+                  <span className="review-nudge-star" aria-hidden="true">★</span>
+                  <p>{lang === 'tr' ? 'Memnun kaldınız mı? Bir yorum bırakırsanız seviniriz.' : 'Enjoying it? We would love your review.'}</p>
+                  <div className="review-nudge-btns">
+                    <button type="button" className="tool-btn solid" onClick={openStoreReview}>
+                      {lang === 'tr' ? 'Puan Ver ↗' : 'Rate ↗'}
+                    </button>
+                    <button type="button" className="tool-btn" onClick={dismissReviewNudge}>✕</button>
+                  </div>
+                </div>
+              )}
+
+              {/* Araçlar: tek kart + alt köşede ileri/geri butonları,
+                  sağa-sola kayma animasyonuyla geçiş */}
+              {!isAnalyzing && (
+                <div className="tool-pager">
+                  <div key={`${toolIndex}-${toolDir}`} className={`tool-slide-wrap slide-${toolDir > 0 ? 'left' : 'right'}`}>
+                  {toolIndex === 0 && (
+                  <section className="feature-card">
+                    <div className="feature-card-head">
+                      <span>{lang === 'tr' ? '◉ Canlı Önizleme' : '◉ Live Preview'}</span>
+                      <span className="mono-tag">html + css</span>
+                    </div>
+                    <div className="feature-card-body">
+                      {previewDoc ? (
+                        <iframe title="preview" className="preview-frame" sandbox="" srcDoc={previewDoc} />
+                      ) : (
+                        <p style={{ margin: 0, fontSize: 11, color: '#8fa6bf' }}>{lang === 'tr' ? 'Önizleme için önce öğe seçin.' : 'Select an element for preview.'}</p>
+                      )}
+                      <small style={{ color: '#647a93', fontSize: 10.5 }}>
+                        {lang === 'tr' ? 'Seçili HTML + üretilen CSS ile birebir önizleme. Beyaz zemin bilinçli: gerçek sayfa zemini.' : 'Renders selected HTML with generated CSS on a neutral canvas.'}
+                      </small>
+                    </div>
+                  </section>
+                  )}
+
+                  {toolIndex === 1 && (
+                  <section className="feature-card">
+                    <div className="feature-card-head">
+                      <span>{lang === 'tr' ? '● Renk & Yazı Paleti' : '● Color & Type'}</span>
+                      <span className="mono-tag">{palette.colors.length} renk</span>
+                    </div>
+                    <div className="feature-card-body">
+                      {palette.colors.length === 0 && <p style={{ margin: 0, fontSize: 11, color: '#8fa6bf' }}>{lang === 'tr' ? 'Renk bulunamadı.' : 'No colors found.'}</p>}
+                      <div className="palette-row">
+                        {palette.colors.map((c) => (
+                          <button key={c.hex} type="button" className="palette-swatch" onClick={() => copyOutput(`pal-${c.hex}`, c.hex)} title={lang === 'tr' ? 'Kopyalamak için tıkla' : 'Click to copy'}>
+                            <span className="palette-dot" style={{ background: c.hex }} />
+                            <span className="palette-meta">
+                              <strong>{copied === `pal-${c.hex}` ? '✓' : c.hex}</strong>
+                              <small>{c.roles.join(' • ') || `${c.count}×`}</small>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                      {palette.fonts.length > 0 && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          {palette.fonts.map((f) => (
+                            <small key={f.label} style={{ fontSize: 10.5, color: '#8fa6bf', fontFamily: 'ui-monospace, monospace' }}>✎ {f.label}</small>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </section>
+                  )}
+
+                  {toolIndex === 2 && (
+                  <section className="feature-card">
+                    <div className="feature-card-head">
+                      <span>{lang === 'tr' ? '✦ Kod İyileştirme' : '✦ Enhance'}</span>
+                      <span className="mono-tag">dark • responsive • a11y</span>
+                    </div>
+                    <div className="feature-card-body">
+                      <div className="enhance-toolbar">
+                        <button type="button" className={`tool-btn ${variant === 'dark' ? 'solid' : ''}`} onClick={() => applyVariant('dark')}>🌙 Dark</button>
+                        <button type="button" className={`tool-btn ${variant === 'responsive' ? 'solid' : ''}`} onClick={() => applyVariant('responsive')}>📐 Responsive</button>
+                        <button type="button" className={`tool-btn ${variant === 'a11y' ? 'solid' : ''}`} onClick={() => applyVariant('a11y')}>♿ A11y</button>
+                        {variantOutput && <button type="button" className="tool-btn" onClick={() => copyOutput('variant', variantOutput)}>{copied === 'variant' ? t.copied : t.copyCode}</button>}
+                      </div>
+                      {variant === 'a11y' ? (
+                        <ul className="a11y-list">
+                          {a11yChecks.map((c, i) => <li key={i} className={c.level}>{c.level === 'ok' ? '✓ ' : '⚠ '}{c.text}</li>)}
+                        </ul>
+                      ) : (
+                        variantOutput ? <pre className="variant-output">{variantOutput}</pre>
+                        : <small style={{ color: '#647a93', fontSize: 10.5 }}>{lang === 'tr' ? 'Bir varyant seçin; sonuç burada belirir.' : 'Pick a variant to preview the tweak.'}</small>
+                      )}
+                    </div>
+                  </section>
+                  )}
+
+                  {toolIndex === 3 && (
+                  <section className="feature-card">
+                    <div className="feature-card-head">
+                      <span>{lang === 'tr' ? '⤓ Dışa Aktar' : '⤓ Export'}</span>
+                      <span className="mono-tag">{exportBase}</span>
+                    </div>
+                    <div className="feature-card-body">
+                      <div className="export-toolbar">
+                        <button type="button" className="tool-btn solid" onClick={() => handleExport('jsx')}>⬇ .jsx</button>
+                        <button type="button" className="tool-btn" onClick={() => handleExport('css')}>⬇ .css</button>
+                        <button type="button" className="tool-btn" onClick={() => handleExport('json')}>⬇ .json</button>
+                        <button type="button" className="tool-btn" onClick={() => handleExport('all')}>{copied === 'all' ? t.copied : (lang === 'tr' ? '⧉ Tümünü kopyala' : '⧉ Copy all')}</button>
+                      </div>
+                      <small style={{ color: '#647a93', fontSize: 10.5 }}>
+                        {lang === 'tr' ? 'Dosya adı öğe + boyuttan üretilir, projenize yapıştırmaya hazır.' : 'Filenames derive from tag + size, ready to drop in.'}
+                      </small>
+                    </div>
+                  </section>
+                  )}
+                  </div>
+                  <div className="tool-pager-bar">
+                    <span className="tool-pager-title">
+                      {[
+                        lang === 'tr' ? 'Önizleme' : 'Preview',
+                        lang === 'tr' ? 'Palet' : 'Palette',
+                        lang === 'tr' ? 'İyileştirme' : 'Enhance',
+                        lang === 'tr' ? 'Dışa Aktar' : 'Export'
+                      ][toolIndex]}
+                    </span>
+                    <div className="tool-pager-btns">
+                      <button type="button" className="pager-btn" onClick={() => goTool(-1)} aria-label={lang === 'tr' ? 'Önceki araç' : 'Previous tool'}>‹</button>
+                      <span className="pager-count">{toolIndex + 1}/4</span>
+                      <button type="button" className="pager-btn" onClick={() => goTool(1)} aria-label={lang === 'tr' ? 'Sonraki araç' : 'Next tool'}>›</button>
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
           )}
@@ -1302,12 +1946,24 @@ Selected UI: ${promptSelectionJson}`;
                   </button>
                 </div>
                 <pre className="code-output">{tailwind || 'No mapped styles'}</pre>
-              </article>
+                </article>
+            </div>
+          )}
+
+          {/* Ayarlar sayfası */}
+          {activeTab === 'settings' && (
+            <div className="tab-pane">
+              {renderSettingsPage()}
             </div>
           )}
 
         </section>
-      )}
+      ))}
+        <footer className="panel-footer">
+          <span className="panel-footer-dot" />
+          <span>UI Cloner</span>
+          <span className="mono-tag" style={{ fontFamily: 'ui-monospace, monospace', fontSize: 9 }}>v{EXT_VERSION}</span>
+        </footer>
       </div>
     </main>
   );

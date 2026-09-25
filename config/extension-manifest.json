@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "BYECO UI Cloner",
-  "version": "1.0.0",
-  "description": "Inspect web elements and generate clean React JSX, Tailwind CSS, and production-ready component code with BYECO AI.",
+  "name": "UI Cloner",
+  "version": "1.1.0",
+  "description": "Inspect web elements and generate clean React JSX, Tailwind CSS, and production-ready component code with built-in AI.",
   "background": {
     "service_worker": "assets/background.js",
     "type": "module"
@@ -13,7 +13,7 @@
   },
   "action": {
     "default_icon": "ICON/icon.png",
-    "default_title": "BYECO UI Cloner"
+    "default_title": "UI Cloner"
   },
   "permissions": ["activeTab", "scripting", "sidePanel", "storage", "contextMenus"],
   "host_permissions": [

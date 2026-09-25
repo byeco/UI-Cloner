@@ -30,8 +30,8 @@ function Popup() {
   return (
     <main className="popup-shell">
       <div className="brand-lockup">
-        <span className="brand-mark">B</span>
-        <span>BYECO / UI CLONER</span>
+        <span className="brand-mark">U</span>
+        <span>UI CLONER</span>
       </div>
       <div className="popup-title-row">
         <div>

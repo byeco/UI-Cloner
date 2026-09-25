@@ -1,0 +1,19 @@
+# BYECO AI proxy — one-click deploy (Render Blueprint).
+# 1) Push this repo to GitHub.
+# 2) Render Dashboard > New > Blueprint > select this repo.
+# 3) Set the GROQ_API_KEY env var when prompted (secret, never in code).
+# 4) After deploy, copy the public URL (e.g. https://byeco-ai.onrender.com),
+#    paste it as DEFAULT_PROXY_URL in src/sidepanel/main.jsx, rebuild + repackage.
+services:
+  - type: web
+    name: byeco-ai
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: PUBLIC_MODE
+        value: true

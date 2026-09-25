@@ -1,10 +1,10 @@
-# BYECO UI Cloner
+# UI Cloner
 
-BYECO UI Cloner is a modern Manifest V3 Chrome extension for developers and designers. Select any element on a live webpage, inspect its visual structure, and turn it into clean React JSX, Tailwind CSS, and production-ready component code with AI assistance.
+UI Cloner is a modern Manifest V3 Chrome extension for developers and designers. Select any element on a live webpage, inspect its visual structure, and turn it into clean React JSX, Tailwind CSS, and production-ready component code with AI assistance.
 
 ## Official Description
 
-**BYECO UI Cloner helps you move from interface inspiration to usable code.** Inspect any web component directly in your browser, understand its layout and visual styles, generate a responsive React/Tailwind implementation, and copy the result into your project in seconds. It is designed for fast prototyping, design exploration, and front-end development while keeping your data and API settings under your control.
+**UI Cloner helps you move from interface inspiration to usable code.** Inspect any web component directly in your browser, understand its layout and visual styles, generate a responsive React/Tailwind implementation, and copy the result into your project in seconds. It is designed for fast prototyping, design exploration, and front-end development while keeping your data and API settings under your control.
 
 ## ✨ Features
 
@@ -18,7 +18,7 @@ BYECO UI Cloner is a modern Manifest V3 Chrome extension for developers and desi
   - Production-ready React code
   - Actionable next steps
 - **Privacy & Security First:**
-  - **BYECO AI Server (Recommended):** Run the included Node.js proxy (`npm run server` or double-click `BASLAT-SUNUCU.bat`) with the shared key in your local `.env` file. Extension users need no API key of their own.
+  - **UI Cloner AI (Default):** Works out of the box on the shared quota — no key, no server, zero setup for users.
   - **Direct Mode:** Alternatively, enter your own free Groq API key in Settings. It stays in your browser's private `chrome.storage.local` sandbox.
 
 ---
@@ -44,18 +44,25 @@ The packaging command rebuilds `dist/`, removes any previous ZIP, and verifies t
 
 ### 2. Deploy the AI server once (your key lives here, never in the extension)
 
-Users install only the extension — no terminal, no `.bat`, zero setup.
-Your Groq key stays on the server as an environment variable.
+Users install only the extension — no terminal, no server, zero setup.
+By default the build embeds the shared key (`VITE_SHARED_GROQ_KEY` from
+your local `.env`, never committed) and the extension calls Groq directly.
+Your Groq key stays on the server as an environment variable only if you
+choose the hosted-proxy route below.
 
-1. Deploy `server/` to any Node host (Render / Railway / Fly.io / VPS with Docker):
-   - Docker: build this repo's `Dockerfile` (`.env` and `.groqkey.enc` are excluded by `.dockerignore`).
-   - Or plain Node: copy `server/`, `package.json`, `package-lock.json`; run `npm ci --omit=dev`, then `node server/index.mjs`.
+1. Push this repo to GitHub, then Render Dashboard > New > Blueprint
+   (uses `render.yaml` + `Dockerfile`; free plan is enough to start).
+   Alternatives: Railway / Fly.io / any VPS with Docker.
 2. Set these environment variables on the host:
    - `GROQ_API_KEY` = your shared key (secret env var — never in code)
-   - `HOST=0.0.0.0`, `PORT=8787` (or the host's port), `PUBLIC_MODE=true`
-3. Point the extension at it: set `PROXY_API_URL` in `src/sidepanel/main.jsx` to your public URL (e.g. `https://byeco-ai.onrender.com`), then rebuild + repackage.
+   - `GROQ_MODEL=openai/gpt-oss-120b`, `PUBLIC_MODE=true`
+   (`HOST=0.0.0.0` and `PORT` are already set in the Dockerfile.)
+3. Copy the public URL (e.g. `https://byeco-ai.onrender.com`), set it as
+   `DEFAULT_PROXY_URL` in `src/sidepanel/main.jsx`, then rebuild + repackage.
+   From that moment every user runs on your quota with no key of their own.
+   Anyone who prefers their own key can switch to Direct mode in Settings.
 
-Local development alternative (key stays on your machine only):
+Local development only (key stays on your machine, users never do this):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/set-key.ps1
@@ -67,7 +74,7 @@ npm run server
 1. Open Chrome and navigate to `chrome://extensions`.
 2. Enable **Developer mode** in the top right.
 3. Click **Load unpacked** and select the `dist/` directory.
-4. Pin BYECO UI Cloner and open the Side Panel!
+4. Pin UI Cloner and open the Side Panel!
 
 ---
 
@@ -75,10 +82,20 @@ npm run server
 
 Two ways to power the AI features:
 
-### Option A: BYECO AI Server (Recommended — no key needed in the extension)
-1. Put the shared key in `.env` as `GROQ_API_KEY`.
-2. Start the server (`npm run server` or `BASLAT-SUNUCU.bat`).
-3. In the side panel Settings, choose **BYECO AI Server**. Done!
+### Option A: UI Cloner AI (Default — no key needed in the extension)
+1. Put the shared key in your local `.env` as `VITE_SHARED_GROQ_KEY` (never committed).
+2. Run `npm run package` — the key is embedded into the built ZIP at build time.
+3. In the side panel Settings, choose **UI Cloner AI**. Done!
+
+### Removing the token from the build entirely (recommended once hosted)
+Client-side secrets can always be extracted by a determined reader — no
+obfuscation changes that. The real fix is a hosted proxy holding the key:
+1. Deploy with `render.yaml` (Render Blueprint), set `GROQ_API_KEY` on the host.
+2. Set `DEFAULT_PROXY_URL` in `src/sidepanel/main.jsx` to the public URL.
+3. Empty `VITE_SHARED_GROQ_KEY` in your local `.env`, then `npm run package`.
+4. Run `npm run verify-dist` — it fails the build if any key-like string
+   remains in `dist/`. With an empty shared key the app automatically runs
+   proxy-first and never carries a token.
 
 ### Option B: Direct Mode (your own key, no server)
 1. Open Settings (⚙) in the side panel.

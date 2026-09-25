@@ -17,11 +17,11 @@ if (!window.__OMNITAB_INSPECTOR_LOADED__) {
         position: 'fixed',
         pointerEvents: 'none',
         zIndex: '2147483646',
-        border: '2px solid #ed5b4e',
-        background: 'rgba(237, 91, 78, 0.12)',
+        border: '2px solid #22d3ee',
+        background: 'rgba(34, 211, 238, 0.12)',
         borderRadius: '2px',
         transition: 'all 60ms ease-out',
-        boxShadow: '0 0 0 1px rgba(0,0,0,0.3)'
+        boxShadow: '0 0 0 1px rgba(2,8,20,0.5)'
       });
       document.documentElement.appendChild(highlight);
     }
@@ -33,9 +33,9 @@ if (!window.__OMNITAB_INSPECTOR_LOADED__) {
         position: 'fixed',
         pointerEvents: 'none',
         zIndex: '2147483647',
-        background: '#1b1210',
-        color: '#f4f1eb',
-        border: '1px solid #ed5b4e',
+        background: '#0b1628',
+        color: '#e6f0fa',
+        border: '1px solid #22d3ee',
         borderRadius: '4px',
         padding: '2px 7px',
         fontSize: '11px',
@@ -116,7 +116,10 @@ if (!window.__OMNITAB_INSPECTOR_LOADED__) {
       let html = clone.outerHTML || '';
       html = html.replace(/\s+/g, ' ').trim();
       if (html.length > maxLength) {
-        return html.slice(0, maxLength) + '... <!-- truncated -->';
+        // Etiketi ortadan bölme: son tam kapanan tag'de kes.
+        const cut = html.lastIndexOf('>', maxLength);
+        html = (cut > maxLength * 0.5 ? html.slice(0, cut + 1) : html.slice(0, maxLength)) + '<!-- truncated -->';
+        return html;
       }
       return html;
     } catch {
@@ -237,6 +240,7 @@ if (!window.__OMNITAB_INSPECTOR_LOADED__) {
           children: serializedTree?.children || [],
           totalChildren: target.children.length,
           htmlSnippet,
+          pageUrl: location.href,
           rect: {
             top: rect.top,
             left: rect.left,
